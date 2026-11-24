@@ -1,5 +1,5 @@
 import argparse
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -9,9 +9,11 @@ from config import (
     CATALOG_PATH,
     DATA_PATH,
     HORIZON_WEEKS,
+    MAX_ANNUAL_DRIFT,
     PEAK_WEEK_END,
     PEAK_WEEK_START,
     PREDICTIONS_PATH,
+    SEASON_WINDOW_WEEKS,
     SERIALS_PATH,
 )
 from watch_lookup import format_results, lookup_watch
@@ -38,9 +40,10 @@ def load_catalog(path):
     if not Path(path).exists():
         return {}
     frame = pd.read_csv(path, dtype=str).fillna("")
-    if "serial" not in frame.columns:
+    key = "serial" if "serial" in frame.columns else "identifier" if "identifier" in frame.columns else None
+    if key is None:
         return {}
-    return {row["serial"]: row.to_dict() for _, row in frame.iterrows()}
+    return {row[key]: row.to_dict() for _, row in frame.iterrows()}
 
 
 def describe_watch(entry):
@@ -72,25 +75,60 @@ def read_inputs(args):
     return serial, parse_price(raw_price)
 
 
-def seasonal_multipliers(history):
+def week_distance(a, b):
+    diff = abs(int(a) - int(b)) % 52
+    return min(diff, 52 - diff)
+
+
+def target_iso_week(target_date):
+    return int(pd.Timestamp(target_date).isocalendar().week)
+
+
+def seasonal_multipliers(history, target_week=None, window=SEASON_WINDOW_WEEKS):
+    """Historical HORIZON_WEEKS price ratios for windows ending near ``target_week``.
+
+    With ``target_week=None`` the legacy behaviour is kept: all windows ending in
+    the Q4 peak (PEAK_WEEK_START..PEAK_WEEK_END).
+    """
     ratios = []
     if "week_start" not in history or "price" not in history or history.empty:
         return np.asarray(ratios, dtype=float)
-    iso_week = history["week_start"].dt.isocalendar().week
-    prices = history["price"].to_numpy(dtype=float)
-    for index in range(HORIZON_WEEKS, len(history)):
-        week = int(iso_week.iloc[index])
-        if not PEAK_WEEK_START <= week <= PEAK_WEEK_END:
-            continue
-        start_price = prices[index - HORIZON_WEEKS]
-        end_price = prices[index]
-        if start_price > 0 and end_price > 0:
-            ratios.append(end_price / start_price)
-    return np.clip(np.asarray(ratios, dtype=float), 0.5, 2.0)
+    frame = history[["week_start", "price"]].copy()
+    frame["week_start"] = pd.to_datetime(frame["week_start"], errors="coerce")
+    frame["price"] = pd.to_numeric(frame["price"], errors="coerce")
+    frame = frame.dropna().sort_values("week_start").drop_duplicates("week_start", keep="last")
+    if frame.empty:
+        return np.asarray(ratios, dtype=float)
+    # Look back by calendar time, not by row count: live sources have gaps,
+    # so "8 rows back" can silently mean months or years back.
+    end_weeks = frame["week_start"].dt.isocalendar().week.astype(int)
+    if target_week is None:
+        in_season = end_weeks.between(PEAK_WEEK_START, PEAK_WEEK_END)
+    else:
+        in_season = end_weeks.map(lambda week: week_distance(week, target_week) <= window)
+    targets = frame[in_season].copy()
+    targets["lookup"] = targets["week_start"] - pd.Timedelta(weeks=HORIZON_WEEKS)
+    starts = frame.rename(columns={"week_start": "lookup", "price": "start_price"})
+    paired = pd.merge_asof(
+        targets.sort_values("lookup"),
+        starts,
+        on="lookup",
+        direction="nearest",
+        tolerance=pd.Timedelta(days=3),
+    ).dropna(subset=["start_price"])
+    paired = paired[(paired["start_price"] > 0) & (paired["price"] > 0)]
+    ratios = (paired["price"] / paired["start_price"]).to_numpy(dtype=float)
+    return np.clip(ratios, 0.5, 2.0)
 
 
-def estimate_price(history, current_price):
-    ratios = seasonal_multipliers(history)
+def estimate_price(history, current_price, target_date=None):
+    """Seasonal HORIZON_WEEKS forecast.
+
+    Pass ``target_date`` (the date the forecast lands on) so the multiplier is
+    learned from the same time of year. Without it, the Q4 multiplier is used.
+    """
+    target_week = target_iso_week(target_date) if target_date is not None else None
+    ratios = seasonal_multipliers(history, target_week=target_week)
     if ratios.size == 0:
         return current_price, current_price, current_price, 1.0, False
     multiplier = float(np.median(ratios))
@@ -103,6 +141,32 @@ def estimate_price(history, current_price):
         multiplier,
         True,
     )
+
+
+def long_run_drift(history, lookback_weeks=104, min_points=6, min_span_weeks=26):
+    """Annualised log-linear price drift over the recent history, clipped to a sane range.
+
+    Returns 0.0 when there is too little data to say anything.
+    """
+    if history is None or history.empty or "week_start" not in history or "price" not in history:
+        return 0.0
+    frame = history[["week_start", "price"]].copy()
+    frame["week_start"] = pd.to_datetime(frame["week_start"], errors="coerce")
+    frame["price"] = pd.to_numeric(frame["price"], errors="coerce")
+    frame = frame.dropna()
+    frame = frame[frame["price"] > 0]
+    if frame.empty:
+        return 0.0
+    cutoff = frame["week_start"].max() - pd.Timedelta(weeks=lookback_weeks)
+    frame = frame[frame["week_start"] >= cutoff]
+    if len(frame) < min_points:
+        return 0.0
+    weeks = (frame["week_start"] - frame["week_start"].min()).dt.days.to_numpy(dtype=float) / 7.0
+    if weeks.max() < min_span_weeks:
+        return 0.0
+    slope = np.polyfit(weeks, np.log(frame["price"].to_numpy(dtype=float)), 1)[0]
+    annual = float(np.expm1(slope * 52.0))
+    return float(np.clip(annual, -MAX_ANNUAL_DRIFT, MAX_ANNUAL_DRIFT))
 
 
 def save_prediction(path, record):
@@ -170,16 +234,21 @@ def main():
     if args.info_only:
         return
     print(f"price history: {history_source}")
-    predicted, low, high, multiplier, learned = estimate_price(scoped, current_price)
+    now = datetime.now(timezone.utc)
+    target_date = (now + timedelta(weeks=HORIZON_WEEKS)).date()
+    predicted, low, high, multiplier, learned = estimate_price(scoped, current_price, target_date=target_date)
     print(f"current price: ${current_price:,.2f}")
-    print(f"predicted price in {HORIZON_WEEKS} weeks (Q4 weeks {PEAK_WEEK_START}-{PEAK_WEEK_END}): ${predicted:,.2f}")
+    print(
+        f"predicted price in {HORIZON_WEEKS} weeks ({target_date}, ISO week {target_iso_week(target_date)}): "
+        f"${predicted:,.2f}"
+    )
     print(f"range: ${low:,.2f} - ${high:,.2f} | seasonal multiplier: {multiplier:.3f}")
     if not learned:
-        print("warning: no Q4 history found; using neutral multiplier")
+        print("warning: no history for this time of year; using neutral multiplier")
     save_prediction(
         args.predictions,
         {
-            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "timestamp": now.isoformat(timespec="seconds").replace("+00:00", "Z"),
             "serial": serial,
             "sku": sku,
             "current_price": round(current_price, 2),

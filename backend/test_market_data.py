@@ -343,9 +343,35 @@ def test_predict_uses_saved_model_history(tmp_path, monkeypatch, capsys):
             "--no-web",
             "--data",
             str(tmp_path / "missing.csv"),
+            "--predictions",
+            str(tmp_path / "predictions.csv"),
         ],
     )
     predict_main()
     output = capsys.readouterr().out
     assert "price history: 126505.csv" in output
     assert "sku: 126505" in output
+
+
+def test_find_kello_watch_does_not_fall_back_to_a_different_reference(monkeypatch):
+    def fake_get(url, params=None, headers=None, timeout=None):
+        return fake_response({"data": [{"slug": "other", "reference_number": "116500LN"}]})
+
+    monkeypatch.setattr(market_data.requests, "get", fake_get)
+    with pytest.raises(RuntimeError):
+        market_data.find_kello_watch("Rolex", "126505", "key")
+
+
+def test_market_data_calls_are_cached(monkeypatch):
+    calls = []
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        calls.append(url)
+        return fake_response({"market_summary": {"average_price": 60000}})
+
+    monkeypatch.setattr(market_data.requests, "get", fake_get)
+    first = fetch_valuation("Rolex", "126505")
+    first["average_price"] = 1  # callers mutating results must not poison the cache
+    second = fetch_valuation("Rolex", "126505")
+    assert len(calls) == 1
+    assert second["average_price"] == 60000

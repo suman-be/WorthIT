@@ -8,7 +8,7 @@ import pytest
 
 from config import HORIZON_WEEKS
 from generate_sample_data import build_history
-from predict import estimate_price, main, parse_price, seasonal_multipliers
+from predict import estimate_price, long_run_drift, main, parse_price, seasonal_multipliers
 
 
 def test_seasonal_multipliers_learns_q4_uplift():
@@ -97,3 +97,39 @@ def test_cli_prompts_for_serial_and_price(tmp_path, monkeypatch, capsys):
     assert "$600.00" in output
     logged = pd.read_csv(predictions_path)
     assert logged["serial"].iloc[0] == "SER-9"
+
+
+def test_seasonal_multipliers_ignores_rows_that_are_not_8_weeks_apart():
+    # Sparse live history: consecutive rows are years apart, so no real 8-week window exists.
+    history = pd.DataFrame(
+        {
+            "week_start": pd.to_datetime(
+                ["2016-10-02", "2017-11-26", "2018-11-25", "2019-11-24", "2020-11-29",
+                 "2021-11-28", "2022-11-27", "2023-11-26", "2024-11-24", "2025-11-30"]
+            ),
+            "price": [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000],
+        }
+    )
+    assert seasonal_multipliers(history).size == 0
+
+
+def test_seasonal_multipliers_matches_by_date_despite_missing_weeks():
+    dates = pd.to_datetime(["2025-10-05", "2025-10-19", "2025-11-30"])
+    history = pd.DataFrame({"week_start": dates, "price": [100.0, 105.0, 120.0]})
+    ratios = seasonal_multipliers(history)
+    assert ratios.tolist() == pytest.approx([1.2])
+
+
+def test_estimate_price_uses_time_of_year_of_target():
+    history = build_history()  # synthetic: +10% level during ISO weeks 40-52
+    into_peak, *_ = estimate_price(history, 500.0, target_date="2026-12-06")
+    after_peak, *_ = estimate_price(history, 500.0, target_date="2027-01-24")
+    assert into_peak > 500.0
+    assert after_peak < 500.0
+
+
+def test_long_run_drift_detects_trend_and_needs_enough_data():
+    weeks = pd.date_range("2024-01-07", periods=104, freq="W-SUN")
+    rising = pd.DataFrame({"week_start": weeks, "price": 1000.0 * 1.10 ** (np.arange(104) / 52)})
+    assert long_run_drift(rising) == pytest.approx(0.10, abs=0.005)
+    assert long_run_drift(rising.head(4)) == 0.0

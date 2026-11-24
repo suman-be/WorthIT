@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from backtest import run_backtest, summarize
+from backtest import MODELS, run_backtest, summarize
 from baseline import BASELINES, last_price, same_week_last_year, seasonal_ratio
 from config import PEAK_WEEK_END, PEAK_WEEK_START
 from generate_sample_data import build_history
@@ -55,7 +55,8 @@ def test_seasonal_ratio_applies_prior_year_uplift():
 def test_backtest_filters_to_peak_weeks_and_scores_all_baselines():
     results = run_backtest(build_history())
     assert not results.empty
-    assert set(results["model"]) == set(BASELINES)
+    assert set(results["model"]) == set(MODELS)
+    assert set(BASELINES) <= set(MODELS)
     target_weeks = pd.to_datetime(results["target"]).dt.isocalendar().week.astype(int)
     assert target_weeks.between(PEAK_WEEK_START, PEAK_WEEK_END).all()
     summary = summarize(results)
@@ -75,3 +76,17 @@ def test_backtest_cli_prints_summary(tmp_path):
     assert completed.returncode == 0, completed.stderr
     assert "Q4 forecast points" in completed.stdout
     assert "last_price" in completed.stdout
+
+
+def test_seasonal_model_beats_q4_only_model_across_the_year():
+    summary = summarize(run_backtest(build_history(), all_weeks=True))
+    assert summary.loc["seasonal_model", "mae"] < summary.loc["q4_only_model", "mae"]
+
+
+def test_backtest_skips_origins_without_a_price_8_weeks_later():
+    history = build_history()
+    gappy = history.drop(index=range(100, 140)).reset_index(drop=True)
+    results = run_backtest(gappy, all_weeks=True)
+    gaps = (pd.to_datetime(results["target"]) - pd.to_datetime(results["origin"])).dt.days
+    assert not results.empty
+    assert gaps.between(53, 59).all()

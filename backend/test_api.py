@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -67,14 +68,27 @@ def test_future_extrapolation_uses_fractional_exponent():
     assert list(periods) == ["8_weeks", "3_months", "6_months", "12_months"]
     assert periods["8_weeks"]["estimatedValue"] == pytest.approx(1100.0)
     assert periods["8_weeks"]["changePercentage"] == pytest.approx(10.0)
-    expected = 1000.0 * (1.1 ** (13 / 8))
-    assert periods["3_months"]["estimatedValue"] == pytest.approx(round(expected, 2))
+    # no drift: longer horizons stay flat instead of compounding the seasonal bump
+    assert periods["12_months"]["estimatedValue"] == pytest.approx(1000.0)
     for item in result["predictions"]:
         assert item["minimumValue"] <= item["estimatedValue"] <= item["maximumValue"]
+    widths = [item["maximumValue"] - item["minimumValue"] for item in result["predictions"][1:]]
+    assert widths == sorted(widths)
+
+
+def test_future_predictions_follow_long_run_drift():
+    result = build_future_predictions(1000.0, 1000.0, 950.0, 1050.0, 1.0, True, annual_drift=0.10)
+    periods = {item["period"]: item for item in result["predictions"]}
+    assert periods["12_months"]["estimatedValue"] == pytest.approx(1100.0, rel=1e-3)
+    assert "+10.0% per year" in result["explanation"]
 
 
 def test_predict_returns_rich_response_with_mocked_live_apis(tmp_path, monkeypatch):
     monkeypatch.setattr(prediction_service, "ROOT", tmp_path)
+    # forecast made early October so it lands in the same weeks as the mocked history
+    monkeypatch.setattr(
+        prediction_service, "utc_now", lambda: datetime(2026, 10, 5, 12, tzinfo=timezone.utc)
+    )
     monkeypatch.setenv("KELLO_API_KEY", "kello-key")
     calls = []
 
@@ -169,11 +183,11 @@ def test_predict_returns_rich_response_with_mocked_live_apis(tmp_path, monkeypat
     assert any(url.endswith("/watches/rolex-126505") for url, _, _ in calls)
 
 
-def test_predict_falls_back_to_local_history(tmp_path, monkeypatch):
+def test_predict_falls_back_to_saved_history_for_the_same_reference(tmp_path, monkeypatch):
     monkeypatch.setattr(prediction_service, "ROOT", tmp_path)
     monkeypatch.delenv("KELLO_API_KEY", raising=False)
     monkeypatch.delenv("PRICETHATWATCH_API_KEY", raising=False)
-    data_path = tmp_path / "data" / "watch_history.csv"
+    data_path = tmp_path / "data" / "model_history" / "126505.csv"
     data_path.parent.mkdir(parents=True, exist_ok=True)
     build_history().to_csv(data_path, index=False)
 
@@ -196,5 +210,56 @@ def test_predict_falls_back_to_local_history(tmp_path, monkeypatch):
     assert response.status_code == 200
     body = response.json()
     assert body["valuation"]["estimatedValue"] == pytest.approx(500.0)
-    assert any("local watch_history.csv" in item for item in body["dataQuality"]["limitations"])
+    assert any("saved history 126505.csv" in item for item in body["dataQuality"]["limitations"])
     assert body["futureValuation"]["predictions"]
+
+
+def test_predict_respects_live_false(tmp_path, monkeypatch):
+    monkeypatch.setattr(prediction_service, "ROOT", tmp_path)
+    (tmp_path / "data").mkdir()
+    build_history().to_csv(tmp_path / "data" / "watch_history.csv", index=False)
+
+    calls = []
+
+    def fail_get(*args, **kwargs):
+        calls.append(args)
+        raise RuntimeError("network must not be called when live is false")
+
+    monkeypatch.setattr(market_data.requests, "get", fail_get)
+    response = client.post(
+        "/predict",
+        json={"serial": "X1", "price": 500, "brand": "Rolex", "reference": "126505", "live": False},
+    )
+    assert response.status_code == 200
+    assert calls == []
+
+
+def test_predict_hides_internal_errors(monkeypatch):
+    def boom(request, live=True):
+        raise RuntimeError("secret internal path /etc/foo")
+
+    monkeypatch.setattr("api.build_prediction_payload", boom)
+    response = client.post(
+        "/predict",
+        json={"serial": "X1", "price": 500, "brand": "Rolex", "reference": "126505"},
+    )
+    assert response.status_code == 500
+    assert "secret" not in response.text
+
+
+def test_predict_never_uses_demo_dataset_for_a_real_item(tmp_path, monkeypatch):
+    monkeypatch.setattr(prediction_service, "ROOT", tmp_path)
+    (tmp_path / "data").mkdir()
+    build_history().to_csv(tmp_path / "data" / "watch_history.csv", index=False)  # synthetic ~$450 demo
+    response = client.post(
+        "/predict",
+        json={"price": 60000, "brand": "Rolex", "reference": "126500LN", "live": False},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    valuation = body["valuation"]
+    assert valuation["minimumValue"] <= valuation["estimatedValue"] <= valuation["maximumValue"]
+    assert valuation["minimumValue"] > 10000
+    assert body["priceHistory"]["dataPoints"] == []
+    assert body["comparableSales"]["source"] == "none"
+    assert body["futureValuation"]["predictions"][0]["estimatedValue"] == pytest.approx(60000.0)

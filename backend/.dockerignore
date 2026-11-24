@@ -1,0 +1,7 @@
+__pycache__/
+.pytest_cache/
+*.pyc
+.env
+test_*.py
+conftest.py
+data/predictions.csv

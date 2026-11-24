@@ -1,0 +1,47 @@
+[
+  {
+    "id": "rolex-submariner-124060",
+    "brand": "Rolex",
+    "model": "Submariner",
+    "reference": "124060",
+    "specs": {"movement": "automatic", "case_mm": 41, "material": "stainless-steel", "water_resistance_m": 300},
+    "market": {"price": 9550, "resale_retention_pct": 115, "popularity_trend": 0.04},
+    "ownership": {"service_interval_years": 10, "service_cost": 900}
+  },
+  {
+    "id": "omega-speedmaster-310-30-42-50-01-001",
+    "brand": "Omega",
+    "model": "Speedmaster Professional Moonwatch",
+    "reference": "310.30.42.50.01.001",
+    "specs": {"movement": "manual", "case_mm": 42, "material": "stainless-steel", "water_resistance_m": 50},
+    "market": {"price": 7600, "resale_retention_pct": 74, "popularity_trend": 0.06},
+    "ownership": {"service_interval_years": 8, "service_cost": 700}
+  },
+  {
+    "id": "tudor-black-bay-58-m79030n",
+    "brand": "Tudor",
+    "model": "Black Bay Fifty-Eight",
+    "reference": "M79030N-0001",
+    "specs": {"movement": "automatic", "case_mm": 39, "material": "stainless-steel", "water_resistance_m": 200},
+    "market": {"price": 3990, "resale_retention_pct": 78, "popularity_trend": 0.02},
+    "ownership": {"service_interval_years": 10, "service_cost": 520}
+  },
+  {
+    "id": "grand-seiko-sbga211",
+    "brand": "Grand Seiko",
+    "model": "Snowflake",
+    "reference": "SBGA211",
+    "specs": {"movement": "spring-drive", "case_mm": 41, "material": "titanium", "water_resistance_m": 100},
+    "market": {"price": 6200, "resale_retention_pct": 63, "popularity_trend": 0.08},
+    "ownership": {"service_interval_years": 4, "service_cost": 600}
+  },
+  {
+    "id": "cartier-santos-wssa0018",
+    "brand": "Cartier",
+    "model": "Santos de Cartier Large",
+    "reference": "WSSA0018",
+    "specs": {"movement": "automatic", "case_mm": 39.8, "material": "stainless-steel", "water_resistance_m": 100},
+    "market": {"price": 7650, "resale_retention_pct": 76, "popularity_trend": -0.03},
+    "ownership": {"service_interval_years": 6, "service_cost": 650}
+  }
+]

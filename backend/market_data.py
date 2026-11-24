@@ -1,5 +1,9 @@
+import copy
+import functools
 import json
 import os
+import threading
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -24,10 +28,44 @@ HISTORY_COLUMNS = [
 ]
 
 
+CACHE_TTL_SECONDS = int(os.environ.get("MARKET_DATA_CACHE_TTL", "3600"))
+_CACHE = {}
+_CACHE_LOCK = threading.Lock()
+
+
+def clear_cache():
+    with _CACHE_LOCK:
+        _CACHE.clear()
+
+
+def cached(func):
+    """Cache successful results per arguments for CACHE_TTL_SECONDS (failures are not cached).
+
+    External sources are slow and rate limited, and a valuation is valid for an
+    hour anyway (see expiresAt in the API response).
+    """
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        key = (func.__name__, args, tuple(sorted(kwargs.items())))
+        now = time.monotonic()
+        with _CACHE_LOCK:
+            hit = _CACHE.get(key)
+            if hit and now - hit[0] < CACHE_TTL_SECONDS:
+                return copy.deepcopy(hit[1])
+        result = func(*args, **kwargs)
+        with _CACHE_LOCK:
+            _CACHE[key] = (now, result)
+        return copy.deepcopy(result)
+
+    return wrapper
+
+
 def api_key():
     return os.environ.get("PRICETHATWATCH_API_KEY", "").strip()
 
 
+@cached
 def fetch_valuation(brand, reference, key=None, detailed=False):
     headers = {"User-Agent": USER_AGENT}
     key = key or api_key()
@@ -155,7 +193,6 @@ def find_kello_watch(brand, reference, key):
         {"search": reference, "per_page": 10},
         {"search": f"{brand} {reference}", "per_page": 10},
     )
-    fallback = None
     last_error = None
     for params in queries:
         try:
@@ -172,10 +209,6 @@ def find_kello_watch(brand, reference, key):
             ref = first_value(entry, ("reference_number", "referenceNumber", "reference", "ref"))
             if ref and str(ref).strip().upper() == str(reference).strip().upper():
                 return entry
-        if fallback is None and entries and isinstance(entries[0], dict):
-            fallback = entries[0]
-    if fallback is not None:
-        return fallback
     if last_error is not None:
         raise RuntimeError(str(last_error))
     raise RuntimeError(f"Kello has no watch for {brand} {reference}")
@@ -196,6 +229,7 @@ def current_kello_price(watch, detail=None):
     return None
 
 
+@cached
 def fetch_kello_history(brand, reference, key=None):
     key = key or kello_key()
     watch = find_kello_watch(brand, reference, key)
@@ -258,6 +292,7 @@ def to_weekly_history(rows, sku):
     return weekly[HISTORY_COLUMNS]
 
 
+@cached
 def fetch_watch_history(brand, reference, model=None, currency="USD"):
     query = " ".join(
         part.strip() for part in (brand, model) if part and str(part).strip()
