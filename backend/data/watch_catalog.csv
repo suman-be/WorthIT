@@ -1,0 +1,4 @@
+serial,sku,brand,model,variant,description
+WATCH-DEMO-001,WATCH-001,Northfield,Automatic Dress,38mm Black,"Automatic stainless-steel dress watch with a 38 mm case, black dial, and leather strap."
+SER-123,WATCH-001,Northfield,Field Watch,40mm Green,"Solar-powered field watch with a 40 mm brushed-steel case, green dial, and nylon strap."
+SER-9,WATCH-001,Northfield,Diver,42mm Blue,"Dive watch with a 42 mm steel case, blue dial, ceramic bezel, and rubber strap."

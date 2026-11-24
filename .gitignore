@@ -1,0 +1,9 @@
+﻿venv/
+.venv/
+__pycache__/
+*.pyc
+.env
+*.pkl
+*.joblib
+*.h5
+.ipynb_checkpoints/
