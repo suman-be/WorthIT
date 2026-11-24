@@ -73,7 +73,7 @@ def test_get_watches_by_ids_keeps_order_and_skips_unknown():
 
 def test_get_watches_without_ids_returns_catalogue():
     body = client.get("/watches").json()
-    assert len(body) == 5
+    assert len(body) >= 6
     for watch in body:
         assert_watch(watch)
 
@@ -152,3 +152,43 @@ def test_predict_validation_errors_use_frontend_format():
     response = client.post("/predict", json={"price": 0, "brand": "Rolex", "reference": "126505"})
     assert response.status_code == 422
     assert response.json()["error"]["field"] == "price"
+
+
+@pytest.mark.parametrize(
+    "entered, watch_id",
+    [
+        ("124060", "rolex-submariner-124060"),
+        ("310.30.42.50.01.001", "omega-speedmaster-310-30-42-50-01-001"),
+        ("31030425001001", "omega-speedmaster-310-30-42-50-01-001"),
+        ("M79030N-0001", "tudor-black-bay-58-m79030n"),
+        ("m79030n", "tudor-black-bay-58-m79030n"),
+        ("79030N", "tudor-black-bay-58-m79030n"),
+        ("sbga 211", "grand-seiko-sbga211"),
+    ],
+)
+def test_lookup_falls_back_to_reference_number(entered, watch_id):
+    response = client.post("/serial-lookups", json={"serial": entered})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["watch"]["id"] == watch_id
+    assert body["watch"] == client.get(f"/watches/{watch_id}").json()
+    check = body["check"]
+    assert_check(check)
+    assert check["found"] is False
+    assert check["authenticity"] == "unverified"
+    assert check["stolenCheck"] == "unavailable"
+    assert check["productionYear"] is None
+    assert check["serviceHistory"] == []
+    assert "reference number" in check["authenticityNote"]
+
+
+def test_registry_serial_takes_precedence_over_reference():
+    check = client.post("/serial-lookups", json={"serial": "OM5512903"}).json()["check"]
+    assert check["found"] is True
+    assert check["serviceHistory"]
+
+
+def test_unknown_input_with_symbols_is_still_422():
+    response = client.post("/serial-lookups", json={"serial": "999.999.999"})
+    assert response.status_code == 422
+    assert response.json()["error"]["field"] == "serial"
