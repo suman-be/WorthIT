@@ -1,0 +1,77 @@
+/*
+ * WorthIT design tokens.
+ * Light theme by default; dark theme follows prefers-color-scheme.
+ */
+
+:root {
+  color-scheme: light dark;
+
+  /* Colour: light theme */
+  --color-bg: #f7f6f2;
+  --color-surface: #ffffff;
+  --color-text: #1b1f1e;
+  --color-text-muted: #4c544f;
+  --color-border: #c9cec8; /* Decorative dividers only (below 3:1). */
+  --color-border-strong: #4c544f; /* Form control and component boundaries (at least 3:1). */
+  --color-accent: #0f6b5c;
+  --color-on-accent: #ffffff;
+  --color-focus: #0b5145;
+  --color-strong: #0e5a4a;
+  --color-fair: #5d4a18;
+  --color-weak: #8a2f2f;
+  --color-error: var(--color-weak);
+
+  /* Typography */
+  --font-family: 'Avenir Next', 'Segoe UI', system-ui, sans-serif;
+  --font-size-0: 0.8rem;
+  --font-size-1: 1rem;
+  --font-size-2: 1.25rem;
+  --font-size-3: 1.5625rem;
+  --font-size-4: 1.953rem;
+  --font-size-5: 2.441rem;
+  --font-size-6: 3.052rem;
+  --font-size-7: 3.815rem;
+  --font-size-8: 4.768rem;
+  --line-height-tight: 1.15;
+  --line-height-body: 1.5;
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-bold: 600;
+
+  /* Spacing */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+
+  /* Radii */
+  --radius-1: 4px;
+  --radius-2: 8px;
+
+  /* Sizing */
+  --target-min: 44px;
+  --focus-width: 3px;
+  --content-max: 60rem;
+  --measure: 40rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg: #121614;
+    --color-surface: #1b211e;
+    --color-text: #f0f2ef;
+    --color-text-muted: #b6c0b8;
+    --color-border: #36413a;
+    --color-border-strong: #b6c0b8;
+    --color-accent: #7fd3bd;
+    --color-on-accent: #121614;
+    --color-focus: #9fe5d2;
+    --color-strong: #8fdcc6;
+    --color-fair: #e2c37a;
+    --color-weak: #ef9e9e;
+  }
+}

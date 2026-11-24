@@ -1,0 +1,14 @@
+# Dependencies and build output
+node_modules
+dist
+coverage
+*.tsbuildinfo
+
+# Local environment files. Secrets belong here (or, better, only on the backend).
+# Never commit them.
+.env.local
+.env.*.local
+
+# Editor and OS files
+.DS_Store
+*.log
