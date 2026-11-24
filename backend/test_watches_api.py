@@ -148,6 +148,152 @@ def test_market_data_keeps_catalogue_values_without_fx_rate(tmp_path, monkeypatc
     assert client.get("/watches/rolex-submariner-124060").json()["market"]["resale_retention_pct"] == 115
 
 
+def test_price_history_is_monthly_and_converted_with_fx_rate(tmp_path, monkeypatch):
+    monkeypatch.setattr(market_data, "ROOT", tmp_path)
+    monkeypatch.setenv("USD_TO_EUR", "0.5")
+    weeks = pd.date_range("2024-01-07", periods=12, freq="W-SUN")
+    market_data.save_history("124060", pd.DataFrame({"week_start": weeks, "sku": "124060", "price": [10000.0] * 12}))
+    body = client.get("/watches/rolex-submariner-124060/price-history").json()
+    assert body["currency"] == "EUR" and body["source"] == "market"
+    assert [p["date"][:7] for p in body["points"]] == ["2024-01", "2024-02", "2024-03"]
+    assert all(p["price"] == 5000 for p in body["points"])
+
+
+def test_price_history_without_saved_data_is_empty_and_keeps_usd_without_rate(tmp_path, monkeypatch):
+    monkeypatch.setattr(market_data, "ROOT", tmp_path)
+    monkeypatch.delenv("USD_TO_EUR", raising=False)
+    body = client.get("/watches/rolex-submariner-124060/price-history").json()
+    assert body == {
+        "watchId": "rolex-submariner-124060",
+        "currency": "USD",
+        "source": "market",
+        "sourceName": None,
+        "sourceUrl": None,
+        "points": [],
+        "forecast": None,
+    }
+
+
+def recent_history(growth, weeks=104, end=None):
+    end = end or pd.Timestamp.now().normalize()
+    dates = pd.date_range(end=end, periods=weeks, freq="W-SUN")
+    prices = [10000 * (1 + growth) ** (i / 52) for i in range(weeks)]
+    return pd.DataFrame({"week_start": dates, "sku": "124060", "price": prices})
+
+
+def test_price_history_includes_a_read_only_forecast_with_a_range(tmp_path, monkeypatch):
+    monkeypatch.setattr(market_data, "ROOT", tmp_path)
+    monkeypatch.setenv("USD_TO_EUR", "0.5")
+    history = recent_history(0.10)
+    market_data.save_history("124060", history)
+    before = set(tmp_path.rglob("*"))
+    forecast = client.get("/watches/rolex-submariner-124060/price-history").json()["forecast"]
+    assert set(tmp_path.rglob("*")) == before  # nothing written
+    assert [p["date"] > history["week_start"].iloc[-1].strftime("%Y-%m-%d") for p in forecast["points"]] == [True] * 4
+    assert [p["date"] for p in forecast["points"]] == sorted(p["date"] for p in forecast["points"])
+    last_price = history["price"].iloc[-1] * 0.5
+    for point in forecast["points"]:
+        assert point["low"] <= point["price"] <= point["high"]
+    # A rising history gives a rising 12-month estimate, and the range widens with the horizon.
+    assert forecast["points"][-1]["price"] > last_price
+    widths = [p["high"] - p["low"] for p in forecast["points"][1:]]
+    assert widths == sorted(widths)
+    assert isinstance(forecast["explanation"], str)
+
+
+def test_price_history_has_no_forecast_when_saved_history_is_out_of_date(tmp_path, monkeypatch):
+    monkeypatch.setattr(market_data, "ROOT", tmp_path)
+    old_end = pd.Timestamp.now().normalize() - pd.Timedelta(days=400)
+    market_data.save_history("124060", recent_history(0.10, end=old_end))
+    body = client.get("/watches/rolex-submariner-124060/price-history").json()
+    assert body["points"]
+    assert body["forecast"] is None
+
+
+def test_price_history_has_no_forecast_when_history_is_too_thin(tmp_path, monkeypatch):
+    monkeypatch.setattr(market_data, "ROOT", tmp_path)
+    market_data.save_history("124060", recent_history(0.10, weeks=4))
+    assert client.get("/watches/rolex-submariner-124060/price-history").json()["forecast"] is None
+
+
+def test_price_history_from_list_prices_is_labelled(tmp_path, monkeypatch):
+    monkeypatch.setattr(market_data, "ROOT", tmp_path)
+    market_data.save_history("124060", recent_history(0.10))
+    market_data.save_history_source("124060", "Nuvinty", "list", "https://nuvinty.com/x")
+    body = client.get("/watches/rolex-submariner-124060/price-history").json()
+    assert body["source"] == "list"
+    assert body["sourceName"] == "Nuvinty"
+    assert body["sourceUrl"] == "https://nuvinty.com/x"
+    assert body["points"]
+
+
+def list_history(prices, end=None):
+    end = end or pd.Timestamp.now().normalize()
+    years = len(prices) - 1
+    dates = [end - pd.DateOffset(years=years - i) for i in range(len(prices))]
+    return pd.DataFrame({"week_start": dates, "sku": "124060", "price": prices})
+
+
+def save_list_history(tmp_path, monkeypatch, frame):
+    monkeypatch.setattr(market_data, "ROOT", tmp_path)
+    monkeypatch.setenv("USD_TO_EUR", "0.5")
+    market_data.save_history("124060", frame)
+    market_data.save_history_source("124060", "Nuvinty", "list", "https://nuvinty.com/x")
+    return client.get("/watches/rolex-submariner-124060/price-history").json()
+
+
+def test_list_price_outlook_keeps_the_average_rise_with_no_rise_as_the_floor(tmp_path, monkeypatch):
+    body = save_list_history(tmp_path, monkeypatch, list_history([8000.0, 9000.0, 10000.0]))
+    outlook = body["forecast"]
+    assert body["source"] == "list"
+    assert "not a resale forecast" in outlook["explanation"]
+    last = 10000.0 * 0.5
+    first, second = outlook["points"]
+    assert second["date"] > first["date"] > body["points"][-1]["date"]
+    for point in outlook["points"]:
+        assert point["low"] == last  # list prices are not expected to fall
+        assert point["low"] < point["price"] < point["high"]
+    assert second["price"] > first["price"]
+    assert first["price"] == pytest.approx(last * ((10000 / 8000) ** 0.5), rel=0.01)
+
+
+def test_list_price_outlook_caps_the_assumed_yearly_rise(tmp_path, monkeypatch):
+    body = save_list_history(tmp_path, monkeypatch, list_history([1000.0, 5000.0, 25000.0]))
+    first = body["forecast"]["points"][0]
+    assert first["price"] <= 25000.0 * 0.5 * 1.2 + 1
+
+
+def test_list_price_outlook_needs_two_years_a_rise_and_a_recent_price(tmp_path, monkeypatch):
+    short = pd.DataFrame(
+        {
+            "week_start": [pd.Timestamp.now().normalize() - pd.DateOffset(months=6), pd.Timestamp.now().normalize()],
+            "sku": "124060",
+            "price": [9000.0, 10000.0],
+        }
+    )
+    assert save_list_history(tmp_path, monkeypatch, short)["forecast"] is None
+    assert save_list_history(tmp_path, monkeypatch, list_history([10000.0, 10000.0, 10000.0]))["forecast"] is None
+    assert save_list_history(tmp_path, monkeypatch, list_history([11000.0, 10500.0, 10000.0]))["forecast"] is None
+    old_end = pd.Timestamp.now().normalize() - pd.DateOffset(years=2)
+    assert save_list_history(tmp_path, monkeypatch, list_history([8000.0, 9000.0, 10000.0], end=old_end))["forecast"] is None
+
+
+def test_history_source_defaults_to_market_when_missing_or_unreadable(tmp_path, monkeypatch):
+    monkeypatch.setattr(market_data, "ROOT", tmp_path)
+    assert market_data.load_history_source("124060")["kind"] == "market"
+    market_data.source_path("124060").parent.mkdir(parents=True, exist_ok=True)
+    market_data.source_path("124060").write_text("{not json", encoding="utf-8")
+    assert market_data.load_history_source("124060") == {"provider": "", "kind": "market", "url": ""}
+    market_data.source_path("124060").write_text('{"kind": "surprise"}', encoding="utf-8")
+    assert market_data.load_history_source("124060")["kind"] == "market"
+
+
+def test_price_history_unknown_watch_is_404():
+    response = client.get("/watches/does-not-exist/price-history")
+    assert response.status_code == 404
+    assert isinstance(response.json()["error"]["message"], str)
+
+
 def test_predict_validation_errors_use_frontend_format():
     response = client.post("/predict", json={"price": 0, "brand": "Rolex", "reference": "126505"})
     assert response.status_code == 422

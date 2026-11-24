@@ -191,6 +191,11 @@ def get_watch(watch_id: str):
     return watches.get_watch(watch_id)
 
 
+@app.get("/watches/{watch_id}/price-history")
+def get_price_history(watch_id: str):
+    return watches.get_price_history(watch_id)
+
+
 @app.post("/serial-lookups")
 def serial_lookup(payload: SerialLookupIn):
     return watches.lookup_serial(payload.serial)

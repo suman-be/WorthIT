@@ -20,8 +20,9 @@ import logging
 
 import market_data
 import watch_resolver
-from config import SERIAL_REGISTRY_PATH, WATCHES_PATH
-from predict import long_run_drift
+from config import HORIZON_WEEKS, SERIAL_REGISTRY_PATH, WATCHES_PATH
+from prediction_service import build_future_predictions
+from predict import estimate_price, long_run_drift, target_iso_week
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,138 @@ def get_watches(ids=None):
         if watch_id in catalog and watch_id not in seen:
             seen.add(watch_id)
             result.append(enrich_market(catalog[watch_id]))
+    return result
+
+
+FORECAST_WEEKS = {"8_weeks": 8, "3_months": 13, "6_months": 26, "12_months": 52}
+# A forecast starts from the last saved price. If that is older than this, it would describe the past.
+FORECAST_MAX_STALENESS_DAYS = 120
+
+
+def build_forecast(history, factor, now):
+    """Read-only forecast from saved history, using the same model as /predict. None when it cannot say anything.
+
+    Unlike /predict this makes no network calls and writes nothing, so it is safe to run on every page view.
+    """
+    frame = history[["week_start", "price"]].dropna().sort_values("week_start").drop_duplicates("week_start", keep="last")
+    if len(frame) < 2:
+        return None
+    last_date = frame["week_start"].iloc[-1]
+    if (now - last_date.to_pydatetime().replace(tzinfo=timezone.utc)).days > FORECAST_MAX_STALENESS_DAYS:
+        return None
+    base = float(frame["price"].iloc[-1])
+    target_date = (last_date + pd.Timedelta(weeks=HORIZON_WEEKS)).date()
+    predicted, low, high, multiplier, learned = estimate_price(frame, base, target_date=target_date)
+    annual_drift = long_run_drift(frame)
+    if not learned and not annual_drift:
+        return None
+    future = build_future_predictions(
+        base,
+        predicted,
+        low,
+        high,
+        multiplier,
+        learned,
+        annual_drift=annual_drift,
+        target_week=target_iso_week(target_date),
+    )
+    points = [
+        {
+            "date": (last_date + pd.Timedelta(weeks=FORECAST_WEEKS[entry["period"]])).strftime("%Y-%m-%d"),
+            "price": round(entry["estimatedValue"] * factor, 2),
+            "low": round(entry["minimumValue"] * factor, 2),
+            "high": round(entry["maximumValue"] * factor, 2),
+        }
+        for entry in future["predictions"]
+    ]
+    return {"explanation": future["explanation"], "points": points}
+
+
+LIST_OUTLOOK_WEEKS = {"12_months": 52, "24_months": 104}
+LIST_OUTLOOK_MIN_SPAN_DAYS = 730
+LIST_OUTLOOK_MAX_STALENESS_DAYS = 366
+LIST_OUTLOOK_MAX_GROWTH = 0.20
+
+
+def build_list_outlook(history, factor, now):
+    """Where a brand's list price ends up if it keeps rising at its average pace. None when it cannot say.
+
+    List prices move in announced steps, so this is not a resale forecast. The low end is "no rise"
+    (brands rarely cut list prices), the estimate keeps the average yearly rise, and the high end
+    doubles it. Needs two prices at least two years apart and a last price no older than a year.
+    """
+    frame = history[["week_start", "price"]].dropna().sort_values("week_start")
+    if len(frame) < 2:
+        return None
+    first_date, last_date = frame["week_start"].iloc[0], frame["week_start"].iloc[-1]
+    span_days = (last_date - first_date).days
+    if span_days < LIST_OUTLOOK_MIN_SPAN_DAYS:
+        return None
+    if (now - last_date.to_pydatetime().replace(tzinfo=timezone.utc)).days > LIST_OUTLOOK_MAX_STALENESS_DAYS:
+        return None
+    first, last = float(frame["price"].iloc[0]), float(frame["price"].iloc[-1])
+    growth = (last / first) ** (365.25 / span_days) - 1
+    if growth <= 0:
+        return None
+    growth = min(growth, LIST_OUTLOOK_MAX_GROWTH)
+    points = []
+    for weeks in LIST_OUTLOOK_WEEKS.values():
+        years = weeks / 52
+        points.append(
+            {
+                "date": (last_date + pd.Timedelta(weeks=weeks)).strftime("%Y-%m-%d"),
+                "price": round(last * (1 + growth) ** years * factor, 2),
+                "low": round(last * factor, 2),
+                "high": round(last * (1 + 2 * growth) ** years * factor, 2),
+            }
+        )
+    return {
+        "explanation": (
+            f"This is a list price outlook, not a resale forecast. It assumes the brand keeps raising its list "
+            f"price by about {growth * 100:.1f}% a year, as it did between {first_date.year} and {last_date.year}. "
+            "The low end is no rise and the high end is twice that pace. Brands change list prices in steps, "
+            "so the real path will be uneven."
+        ),
+        "points": points,
+    }
+
+
+def get_price_history(watch_id, now=None):
+    """Saved market price history for a watch, one point per month (the last saved week of each month).
+
+    Saved histories are in USD. They are converted to EUR when USD_TO_EUR is set, otherwise
+    returned as USD so the frontend can label the currency honestly. No saved history gives an
+    empty list and no forecast: nothing is invented.
+    """
+    watch = load_catalog().get(watch_id)
+    if watch is None:
+        raise WatchLookupError(404, "We could not find this watch.")
+    rate = usd_to_eur_rate()
+    history_file = market_data.history_path(watch["reference"])
+    origin = market_data.load_history_source(watch["reference"])
+    result = {
+        "watchId": watch_id,
+        "currency": "EUR" if rate else "USD",
+        "source": origin["kind"],
+        "sourceName": origin["provider"] or None,
+        "sourceUrl": origin["url"] or None,
+        "points": [],
+        "forecast": None,
+    }
+    if not history_file.exists():
+        return result
+    history = pd.read_csv(history_file, parse_dates=["week_start"])
+    history = history[history["price"] > 0].sort_values("week_start")
+    monthly = history.groupby(history["week_start"].dt.to_period("M")).last()
+    factor = rate or 1.0
+    result["points"] = [
+        {"date": row["week_start"].strftime("%Y-%m-%d"), "price": round(float(row["price"]) * factor, 2)}
+        for _, row in monthly.iterrows()
+    ]
+    now = now or datetime.now(timezone.utc)
+    # List prices move in announced steps, not with the resale market, so the resale model is not used on them.
+    builder = build_forecast if origin["kind"] == "market" else build_list_outlook
+    result["forecast"] = builder(history, factor, now)
     return result
 
 

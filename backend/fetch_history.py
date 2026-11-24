@@ -6,6 +6,7 @@ from market_data import (
     fetch_watch_history,
     kello_key,
     save_history,
+    save_history_source,
     save_valuation,
 )
 
@@ -64,6 +65,13 @@ def main():
         print("tip: pass --model like 'rolex daytona'")
         return
     path = save_history(args.ref, frame)
+    provider = result.get("provider", "Nuvinty")
+    save_history_source(
+        args.ref,
+        provider,
+        "list" if provider == "Nuvinty" else "market",
+        result.get("url", ""),
+    )
     if valuation is None and result.get("current_price"):
         valuation = {
             "brand": args.brand,

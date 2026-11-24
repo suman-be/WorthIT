@@ -276,7 +276,7 @@ def to_weekly_history(rows, sku):
     frame = pd.DataFrame(rows, columns=["date", "price"])
     if frame.empty:
         return pd.DataFrame(columns=HISTORY_COLUMNS)
-    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce", format="mixed")
     frame["price"] = pd.to_numeric(frame["price"], errors="coerce")
     frame = frame.dropna(subset=["date", "price"])
     frame = frame[frame["price"] > 0].sort_values("date")
@@ -290,6 +290,13 @@ def to_weekly_history(rows, sku):
     weekly["stock_units"] = 0
     weekly["units_sold"] = 0
     return weekly[HISTORY_COLUMNS]
+
+
+def same_reference(left, right):
+    def clean(value):
+        return "".join(char for char in str(value).upper() if char.isalnum())
+
+    return clean(left) == clean(right)
 
 
 @cached
@@ -315,6 +322,13 @@ def fetch_watch_history(brand, reference, model=None, currency="USD"):
         if point_currency:
             currencies.add(point_currency)
         if point_currency != currency.upper():
+            continue
+        # A model page mixes several references (for example 116610LN and 126610LN). A price for a
+        # different reference is a different watch, so it is dropped. Points without a reference are kept.
+        point_reference = point.get("reference")
+        if point_reference and same_reference(point_reference, reference):
+            pass
+        elif point_reference:
             continue
         date = point.get("date")
         price = point.get("price")
@@ -346,6 +360,30 @@ def save_history(reference, frame):
     path.parent.mkdir(parents=True, exist_ok=True)
     frame.to_csv(path, index=False)
     return path
+
+
+def source_path(reference):
+    return ROOT / MODEL_HISTORY_DIR / f"{safe_name(reference)}.source.json"
+
+
+def save_history_source(reference, provider, kind, url=""):
+    """Record where a saved history came from. kind is "list" (brand list prices) or "market" (resale)."""
+    path = source_path(reference)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"provider": provider, "kind": kind, "url": url}, indent=2), encoding="utf-8")
+    return path
+
+
+def load_history_source(reference):
+    path = source_path(reference)
+    if not path.exists():
+        return {"provider": "", "kind": "market", "url": ""}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"provider": "", "kind": "market", "url": ""}
+    kind = data.get("kind") if data.get("kind") in ("list", "market") else "market"
+    return {"provider": str(data.get("provider") or ""), "kind": kind, "url": str(data.get("url") or "")}
 
 
 def save_valuation(reference, valuation):

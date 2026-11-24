@@ -58,6 +58,25 @@ def test_fetch_valuation_works_without_key(monkeypatch):
     assert "X-Api-Key" not in headers_seen[0]
 
 
+def test_fetch_watch_history_drops_prices_of_other_references(monkeypatch):
+    payload = {
+        "data": {
+            "item": "Rolex Submariner Date",
+            "url": "https://nuvinty.com/x",
+            "points": [
+                {"date": "2020-01", "price": 8950, "currency": "USD", "reference": "116610LN"},
+                {"date": "2021-01", "price": 9150, "currency": "USD", "reference": "126610LN"},
+                {"date": "2022-01", "price": 10100, "currency": "USD", "reference": "126610 LN"},
+                {"date": "2023-01", "price": 10250, "currency": "USD"},
+            ],
+        }
+    }
+    monkeypatch.setattr(market_data.requests, "get", lambda *a, **k: fake_response(payload))
+    market_data.clear_cache()
+    result = fetch_watch_history("Rolex", "126610LN", model="submariner")
+    assert list(result["history"]["price"]) == [9150.0, 10100.0, 10250.0]
+
+
 def test_fetch_watch_history_filters_currency_and_builds_weekly(monkeypatch):
     calls = []
 
